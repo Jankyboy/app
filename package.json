@@ -47,7 +47,7 @@
   "devDependencies": {
     "lodash.clonedeep": "^4.5.0",
     "nock": "^13.0.2",
-    "prettier": "^2.0.5",
+    "prettier": "^2.1.2",
     "proxyquire": "^2.0.1",
     "semantic-release": "^17.0.0",
     "simple-mock": "^0.8.0",
