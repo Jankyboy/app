@@ -35,7 +35,7 @@
     "@sinonjs/fake-timers": "^6.0.1",
     "gemoji": "^5.0.1",
     "logdna-bunyan": "^1.1.0",
-    "pino-logdna": "^1.0.5",
+    "pino-logdna": "^2.0.0",
     "pino-sentry": "^0.3.0",
     "pino-sentry-errors": "^1.0.0",
     "pluralize": "^8.0.0",
