@@ -1,21 +1,26 @@
+const Stream = require("stream");
+
 const FakeTimers = require("@sinonjs/fake-timers");
 const { beforeEach, test } = require("tap");
 const nock = require("nock");
-const simple = require("simple-mock");
+const pino = require("pino");
 
 nock.disableNetConnect();
 
-// disable Probot logs, bust be set before requiring probot
-process.env.LOG_LEVEL = "fatal";
 const { Probot, ProbotOctokit } = require("probot");
 
 const app = require("../../");
 
-beforeEach(function (done) {
+let output;
+const streamLogsToOutput = new Stream.Writable({ objectMode: true });
+streamLogsToOutput._write = (object, encoding, done) => {
+  output.push(JSON.parse(object));
+  done();
+};
+
+beforeEach(function () {
+  output = [];
   delete process.env.APP_NAME;
-  process.env.DISABLE_STATS = "true";
-  process.env.DISABLE_WEBHOOK_EVENT_CHECK = "true";
-  process.env.WIP_DISABLE_MEMORY_USAGE = "true";
 
   FakeTimers.install({ toFake: ["Date"] });
 
@@ -25,30 +30,30 @@ beforeEach(function (done) {
     Octokit: ProbotOctokit.defaults({
       throttle: { enabled: false },
       retry: { enabled: false },
+      log: pino(streamLogsToOutput),
     }),
+    log: pino(streamLogsToOutput),
   });
 
-  this.probot.logger.info = simple.mock();
-  this.probot.logger.child = simple.mock().returnWith(this.probot.logger);
-
   this.probot.load(app);
-
-  done();
 });
 
 test("uninstall", async function (t) {
   await this.probot.receive(require("./events/uninstall.json"));
 
-  t.is(this.probot.logger.info.lastCall.arg, "😭 Organization wip uninstalled");
+  t.equal(output[0].msg, "😭 Organization wip uninstalled");
+});
+
+test("suspend", async function (t) {
+  await this.probot.receive(require("./events/suspend.json"));
+
+  t.equal(output[0].msg, "ℹ️ installation.suspend by wip");
 });
 
 test("repositories removed", async function (t) {
   await this.probot.receive(require("./events/repositories-removed.json"));
 
-  t.is(
-    this.probot.logger.info.lastCall.arg,
-    "➖ Organization wip removed 2 repositories"
-  );
+  t.equal(output[0].msg, "➖ Organization wip removed 2 repositories");
 });
 
 test("installation", async function (t) {
@@ -84,6 +89,7 @@ test("installation", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -104,6 +110,7 @@ test("installation", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -118,11 +125,6 @@ test("installation", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/repo1/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // check for current status
     // https://docs.github.com/en/rest/reference/checks#list-check-runs-for-a-git-reference
     .get("/repos/wip/repo1/commits/sha456/check-runs")
@@ -131,15 +133,10 @@ test("installation", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/repo1/commits/sha456/status")
-    .reply(200, { statuses: [] })
-
     // Create 1st check run
     // https://docs.github.com/en/rest/reference/checks#create-a-check-run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha123",
@@ -148,8 +145,7 @@ test("installation", async function (t) {
         output: {
           title: "Ready for review",
           summary: "No match found based on configuration",
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
         conclusion: "success",
         completed_at: "1970-01-01T00:00:00.000Z",
@@ -161,7 +157,7 @@ test("installation", async function (t) {
 
     // create 2nd check run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha456",
@@ -170,8 +166,7 @@ test("installation", async function (t) {
         output: {
           title: 'Title contains "WIP"',
           summary: 'The title "[WIP] Test" contains "WIP".',
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
       });
 
@@ -181,7 +176,7 @@ test("installation", async function (t) {
 
   await this.probot.receive(require("./events/install.json"));
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("repositories added", async function (t) {
@@ -217,6 +212,7 @@ test("repositories added", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -237,6 +233,7 @@ test("repositories added", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -267,6 +264,7 @@ test("repositories added", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -287,6 +285,7 @@ test("repositories added", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -301,19 +300,12 @@ test("repositories added", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/repo1/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // check for current check status & combined status (2nd pr)
     .get("/repos/wip/repo1/commits/sha456/check-runs")
     .query({
       check_name: "WIP",
     })
     .reply(200, { check_runs: [] })
-    .get("/repos/wip/repo1/commits/sha456/status")
-    .reply(200, { statuses: [] })
 
     // check for current check status & combined status (3rd pr)
     .get("/repos/wip/repo2/commits/sha789/check-runs")
@@ -321,8 +313,6 @@ test("repositories added", async function (t) {
       check_name: "WIP",
     })
     .reply(200, { check_runs: [] })
-    .get("/repos/wip/repo2/commits/sha789/status")
-    .reply(200, { statuses: [] })
 
     // check for current check status & combined status (4th pr)
     .get("/repos/wip/repo2/commits/sha100/check-runs")
@@ -330,13 +320,11 @@ test("repositories added", async function (t) {
       check_name: "WIP",
     })
     .reply(200, { check_runs: [] })
-    .get("/repos/wip/repo2/commits/sha100/status")
-    .reply(200, { statuses: [] })
 
     // Create 1st check run
     // https://docs.github.com/en/rest/reference/checks#create-a-check-run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha123",
@@ -345,8 +333,7 @@ test("repositories added", async function (t) {
         output: {
           title: "Ready for review",
           summary: "No match found based on configuration",
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
         conclusion: "success",
         completed_at: "1970-01-01T00:00:00.000Z",
@@ -358,7 +345,7 @@ test("repositories added", async function (t) {
 
     // create 2nd check run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha456",
@@ -367,8 +354,7 @@ test("repositories added", async function (t) {
         output: {
           title: 'Title contains "WIP"',
           summary: 'The title "[WIP] Test" contains "WIP".',
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
       });
 
@@ -378,7 +364,7 @@ test("repositories added", async function (t) {
 
     // create 3rd check run
     .post("/repos/wip/repo2/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha789",
@@ -387,8 +373,7 @@ test("repositories added", async function (t) {
         output: {
           title: "Ready for review",
           summary: "No match found based on configuration",
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
         conclusion: "success",
         completed_at: "1970-01-01T00:00:00.000Z",
@@ -400,7 +385,7 @@ test("repositories added", async function (t) {
 
     // create 4th check run
     .post("/repos/wip/repo2/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha100",
@@ -409,8 +394,7 @@ test("repositories added", async function (t) {
         output: {
           title: 'Title contains "WIP"',
           summary: 'The title "[WIP] Test" contains "WIP".',
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
       });
 
@@ -422,7 +406,7 @@ test("repositories added", async function (t) {
     .receive(require("./events/repositories-added.json"))
     .catch(t.error);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("permissions accepted", async function (t) {
@@ -470,6 +454,7 @@ test("permissions accepted", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -490,6 +475,7 @@ test("permissions accepted", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -504,24 +490,17 @@ test("permissions accepted", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/repo1/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // 2nd pr
     .get("/repos/wip/repo1/commits/sha456/check-runs")
     .query({
       check_name: "WIP",
     })
     .reply(200, { check_runs: [] })
-    .get("/repos/wip/repo1/commits/sha456/status")
-    .reply(200, { statuses: [] })
 
     // Create 1st check run
     // https://docs.github.com/en/rest/reference/checks#create-a-check-run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha123",
@@ -530,8 +509,7 @@ test("permissions accepted", async function (t) {
         output: {
           title: "Ready for review",
           summary: "No match found based on configuration",
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
         conclusion: "success",
         completed_at: "1970-01-01T00:00:00.000Z",
@@ -543,7 +521,7 @@ test("permissions accepted", async function (t) {
 
     // create 2nd check run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha456",
@@ -552,8 +530,7 @@ test("permissions accepted", async function (t) {
         output: {
           title: 'Title contains "WIP"',
           summary: 'The title "[WIP] Test" contains "WIP".',
-          text:
-            'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
+          text: 'By default, WIP only checks the pull request title for the terms "WIP", "Work in progress" and "🚧".\n\nYou can configure both the terms and the location that the WIP app will look for by signing up for the pro plan: https://github.com/marketplace/wip. All revenue will be donated to [Processing | p5.js](https://donorbox.org/supportpf2019-fundraising-campaign) – one of the most diverse and impactful Open Source community there is.',
         },
       });
 
@@ -565,7 +542,7 @@ test("permissions accepted", async function (t) {
     .receive(require("./events/new-permissions-accepted.json"))
     .catch(t.error);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("installation for pro plan", async function (t) {
@@ -607,6 +584,7 @@ test("installation for pro plan", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -627,6 +605,7 @@ test("installation for pro plan", async function (t) {
             owner: {
               id: 1,
               login: "wip",
+              type: "Organization",
             },
           },
         },
@@ -646,11 +625,6 @@ test("installation for pro plan", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/repo1/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // check for current status
     // https://docs.github.com/en/rest/reference/checks#list-check-runs-for-a-git-reference
     .get("/repos/wip/repo1/commits/sha456/check-runs")
@@ -659,15 +633,10 @@ test("installation for pro plan", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/repo1/commits/sha456/status")
-    .reply(200, { statuses: [] })
-
     // Create 1st check run
     // https://docs.github.com/en/rest/reference/checks#create-a-check-run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha123",
@@ -676,8 +645,7 @@ test("installation for pro plan", async function (t) {
         output: {
           title: "Ready for review",
           summary: "No match found based on configuration.",
-          text:
-            "`.github/wip.yml` does not exist, the default configuration is applied:\n\n```yaml\nterms:\n- wip\n- work in progress\n- 🚧\nlocations: title\n```\n\nRead more about [WIP configuration](https://github.com/wip/app#configuration)",
+          text: "`.github/wip.yml` does not exist, the default configuration is applied:\n\n```yaml\nterms:\n- wip\n- work in progress\n- 🚧\nlocations: title\n```\n\nRead more about [WIP configuration](https://github.com/wip/app#configuration)",
         },
         conclusion: "success",
         completed_at: "1970-01-01T00:00:00.000Z",
@@ -694,7 +662,7 @@ test("installation for pro plan", async function (t) {
 
     // create 2nd check run
     .post("/repos/wip/repo1/check-runs", (createCheckParams) => {
-      t.strictDeepEqual(createCheckParams, {
+      t.strictSame(createCheckParams, {
         name: "WIP",
         head_branch: "",
         head_sha: "sha456",
@@ -704,8 +672,7 @@ test("installation for pro plan", async function (t) {
           title: 'Title contains "WIP"',
           summary:
             'The title "[WIP] Test" contains "WIP".\n\n  You can override the status by adding "@wip ready for review" to the end of the [pull request description](undefined#discussion_bucket).',
-          text:
-            "`.github/wip.yml` does not exist, the default configuration is applied:\n\n```yaml\nterms:\n- wip\n- work in progress\n- 🚧\nlocations: title\n```\n\nRead more about [WIP configuration](https://github.com/wip/app#configuration)",
+          text: "`.github/wip.yml` does not exist, the default configuration is applied:\n\n```yaml\nterms:\n- wip\n- work in progress\n- 🚧\nlocations: title\n```\n\nRead more about [WIP configuration](https://github.com/wip/app#configuration)",
         },
       });
 
@@ -715,5 +682,5 @@ test("installation for pro plan", async function (t) {
 
   await this.probot.receive(require("./events/install.json")).catch(t.error);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });

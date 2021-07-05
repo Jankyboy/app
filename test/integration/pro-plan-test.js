@@ -1,20 +1,26 @@
+const Stream = require("stream");
+
 const FakeTimers = require("@sinonjs/fake-timers");
 const { beforeEach, test } = require("tap");
-const simple = require("simple-mock");
 const nock = require("nock");
+const pino = require("pino");
+
 nock.disableNetConnect();
 
-// disable Probot logs, bust be set before requiring probot
-process.env.LOG_LEVEL = "fatal";
 const { Probot, ProbotOctokit } = require("probot");
 
 const app = require("../../");
 
-beforeEach(function (done) {
+let output;
+const streamLogsToOutput = new Stream.Writable({ objectMode: true });
+streamLogsToOutput._write = (object, encoding, done) => {
+  output.push(JSON.parse(object));
+  done();
+};
+
+beforeEach(function () {
+  output = [];
   delete process.env.APP_NAME;
-  process.env.DISABLE_STATS = "true";
-  process.env.DISABLE_WEBHOOK_EVENT_CHECK = "true";
-  process.env.WIP_DISABLE_MEMORY_USAGE = "true";
 
   FakeTimers.install({ toFake: ["Date"] });
 
@@ -24,15 +30,12 @@ beforeEach(function (done) {
     Octokit: ProbotOctokit.defaults({
       throttle: { enabled: false },
       retry: { enabled: false },
+      log: pino(streamLogsToOutput),
     }),
+    log: pino(streamLogsToOutput),
   });
 
-  this.probot.logger.info = simple.mock();
-  this.probot.logger.child = simple.mock().returnWith(this.probot.logger);
-
   this.probot.load(app);
-
-  done();
 });
 
 test('new pull request with "Test" title', async function (t) {
@@ -65,20 +68,15 @@ test('new pull request with "Test" title', async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.name, "WIP");
-      t.is(createCheckParams.status, "completed");
-      t.is(createCheckParams.started_at, "1970-01-01T00:00:00.000Z");
-      t.is(createCheckParams.completed_at, "1970-01-01T00:00:00.000Z");
-      t.is(createCheckParams.status, "completed");
-      t.is(createCheckParams.conclusion, "success");
-      t.is(createCheckParams.output.title, "Ready for review");
+      t.equal(createCheckParams.name, "WIP");
+      t.equal(createCheckParams.status, "completed");
+      t.equal(createCheckParams.started_at, "1970-01-01T00:00:00.000Z");
+      t.equal(createCheckParams.completed_at, "1970-01-01T00:00:00.000Z");
+      t.equal(createCheckParams.status, "completed");
+      t.equal(createCheckParams.conclusion, "success");
+      t.equal(createCheckParams.output.title, "Ready for review");
       t.match(
         createCheckParams.output.summary,
         /No match found based on configuration/
@@ -96,26 +94,32 @@ test('new pull request with "Test" title', async function (t) {
     .receive(require("./events/new-pull-request-with-test-title.json"))
     .catch(t.error);
 
-  t.is(this.probot.logger.info.lastCall.args[1], "✅ wip/app#1");
-  t.is(this.probot.logger.info.callCount, 1);
+  t.equal(output[0].msg, "✅ wip/app#1");
+  t.equal(output.length, 1);
 
-  t.deepEqual(this.probot.logger.child.lastCall.arg, {
+  delete output[0].pid;
+  delete output[0].hostname;
+  t.same(output[0], {
+    level: 30,
+    time: 0,
     name: "WIP",
+    event: "pull_request",
+    action: "opened",
     account: 1,
+    accountName: "wip",
+    accountType: "organization",
     plan: "pro",
     repo: 1,
     private: false,
-    event: "pull_request",
-    action: "opened",
-    wip: false,
     change: true,
-    override: null,
-    location: null,
-    match: null,
+    wip: false,
     hasConfig: false,
+    duration: 0,
+    msg: "✅ wip/app#1",
+    pr: 1,
   });
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test('new pull request with "[WIP] Test" title', async function (t) {
@@ -148,15 +152,10 @@ test('new pull request with "[WIP] Test" title', async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "in_progress");
-      t.is(createCheckParams.output.title, 'Title contains "WIP"');
+      t.equal(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.output.title, 'Title contains "WIP"');
       t.match(
         createCheckParams.output.summary,
         /The title "\[WIP\] Test" contains "WIP"/
@@ -175,13 +174,13 @@ test('new pull request with "[WIP] Test" title', async function (t) {
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.wip, true);
-  t.is(logParams.change, true);
-  t.is(logParams.location, "title");
-  t.is(logParams.match, "WIP");
+  const logParams = output[0];
+  t.equal(logParams.wip, true);
+  t.equal(logParams.change, true);
+  t.equal(logParams.location, "title");
+  t.equal(logParams.match, "WIP");
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test('pending pull request with "Test" title', async function (t) {
@@ -220,15 +219,10 @@ test('pending pull request with "Test" title', async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "completed");
-      t.is(createCheckParams.conclusion, "success");
+      t.equal(createCheckParams.status, "completed");
+      t.equal(createCheckParams.conclusion, "success");
 
       return true;
     })
@@ -239,11 +233,11 @@ test('pending pull request with "Test" title', async function (t) {
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.wip, false);
-  t.is(logParams.change, true);
+  const logParams = output[0];
+  t.equal(logParams.wip, false);
+  t.equal(logParams.change, true);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test('ready pull request with "[WIP] Test" title', async function (t) {
@@ -282,14 +276,9 @@ test('ready pull request with "[WIP] Test" title', async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.status, "in_progress");
 
       return true;
     })
@@ -300,11 +289,11 @@ test('ready pull request with "[WIP] Test" title', async function (t) {
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.wip, true);
-  t.is(logParams.change, true);
+  const logParams = output[0];
+  t.equal(logParams.wip, true);
+  t.equal(logParams.change, true);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test('pending pull request with "[WIP] Test" title', async function (t) {
@@ -341,23 +330,18 @@ test('pending pull request with "[WIP] Test" title', async function (t) {
           status: "pending",
         },
       ],
-    })
-
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] });
+    });
 
   await this.probot.receive(
     require("./events/new-pull-request-with-wip-title.json")
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.wip, true);
-  t.is(logParams.change, false);
+  const logParams = output[0];
+  t.equal(logParams.wip, true);
+  t.equal(logParams.change, false);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test('ready pull request with "Test" title', async function (t) {
@@ -394,26 +378,21 @@ test('ready pull request with "Test" title', async function (t) {
           conclusion: "success",
         },
       ],
-    })
-
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] });
+    });
 
   await this.probot.receive(
     require("./events/new-pull-request-with-test-title.json")
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.wip, false);
-  t.is(logParams.change, false);
+  const logParams = output[0];
+  t.equal(logParams.wip, false);
+  t.equal(logParams.change, false);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
-test("custom term: 🚧", { only: true }, async function (t) {
+test("custom term: 🚧", async function (t) {
   const mock = nock("https://api.github.com")
     // has pro plan
     .get("/marketplace_listing/accounts/1")
@@ -427,9 +406,7 @@ test("custom term: 🚧", { only: true }, async function (t) {
 
     // has config
     .get("/repos/wip/app/contents/.github%2Fwip.yml")
-    .reply(200, {
-      content: Buffer.from("terms: 🚧").toString("base64"),
-    })
+    .reply(200, "terms: 🚧")
 
     // List commits on a pull request
     // https://docs.github.com/en/rest/reference/pulls#list-commits-on-a-pull-request
@@ -449,18 +426,13 @@ test("custom term: 🚧", { only: true }, async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.name, "WIP");
-      t.is(createCheckParams.status, "in_progress");
-      t.is(createCheckParams.completed_at, undefined);
-      t.is(createCheckParams.status, "in_progress");
-      t.is(
+      t.equal(createCheckParams.name, "WIP");
+      t.equal(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.completed_at, undefined);
+      t.equal(createCheckParams.status, "in_progress");
+      t.equal(
         createCheckParams.output.title,
         "Title contains a construction emoji"
       );
@@ -483,28 +455,34 @@ test("custom term: 🚧", { only: true }, async function (t) {
   );
 
   // check resulting logs
-  t.is(
-    this.probot.logger.info.lastCall.args[1],
-    '⏳ wip/app#1 - "🚧" found in title'
-  );
-  t.is(this.probot.logger.info.callCount, 1);
-  t.deepEqual(this.probot.logger.child.lastCall.arg, {
+  t.equal(output[0].msg, '⏳ wip/app#1 - "🚧" found in title');
+  t.equal(output.length, 1);
+
+  delete output[0].pid;
+  delete output[0].hostname;
+  t.same(output[0], {
+    level: 30,
+    time: 0,
     name: "WIP",
-    account: 1,
-    repo: 1,
-    private: false,
-    plan: "pro",
     event: "pull_request",
     action: "opened",
-    wip: true,
+    account: 1,
+    accountName: "wip",
+    accountType: "organization",
+    plan: "pro",
+    repo: 1,
+    private: false,
     change: true,
-    override: null,
+    wip: true,
     location: "title",
     match: "🚧",
     hasConfig: true,
+    duration: 0,
+    msg: '⏳ wip/app#1 - "🚧" found in title',
+    pr: 1,
   });
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("custom term: 🚧NoSpace", async function (t) {
@@ -521,9 +499,7 @@ test("custom term: 🚧NoSpace", async function (t) {
 
     // has config
     .get("/repos/wip/app/contents/.github%2Fwip.yml")
-    .reply(200, {
-      content: Buffer.from("terms: 🚧").toString("base64"),
-    })
+    .reply(200, "terms: 🚧")
 
     // List commits on a pull request
     // https://docs.github.com/en/rest/reference/pulls#list-commits-on-a-pull-request
@@ -543,18 +519,13 @@ test("custom term: 🚧NoSpace", async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.name, "WIP");
-      t.is(createCheckParams.status, "in_progress");
-      t.is(createCheckParams.completed_at, undefined);
-      t.is(createCheckParams.status, "in_progress");
-      t.is(
+      t.equal(createCheckParams.name, "WIP");
+      t.equal(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.completed_at, undefined);
+      t.equal(createCheckParams.status, "in_progress");
+      t.equal(
         createCheckParams.output.title,
         "Title contains a construction emoji"
       );
@@ -576,28 +547,34 @@ test("custom term: 🚧NoSpace", async function (t) {
   );
 
   // check resulting logs
-  t.is(
-    this.probot.logger.info.lastCall.args[1],
-    '⏳ wip/app#1 - "🚧" found in title'
-  );
-  t.is(this.probot.logger.info.callCount, 1);
-  t.deepEqual(this.probot.logger.child.lastCall.arg, {
+  t.equal(output[0].msg, '⏳ wip/app#1 - "🚧" found in title');
+  t.equal(output.length, 1);
+
+  delete output[0].pid;
+  delete output[0].hostname;
+  t.same(output[0], {
+    level: 30,
+    time: 0,
     name: "WIP",
-    account: 1,
-    repo: 1,
-    private: false,
-    plan: "pro",
     event: "pull_request",
     action: "opened",
-    wip: true,
+    account: 1,
+    accountName: "wip",
+    accountType: "organization",
+    plan: "pro",
+    repo: 1,
+    private: false,
     change: true,
-    override: null,
+    wip: true,
     location: "title",
     match: "🚧",
     hasConfig: true,
+    duration: 0,
+    msg: '⏳ wip/app#1 - "🚧" found in title',
+    pr: 1,
   });
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("custom location: label_name", async function (t) {
@@ -614,9 +591,7 @@ test("custom location: label_name", async function (t) {
 
     // has config
     .get("/repos/wip/app/contents/.github%2Fwip.yml")
-    .reply(200, {
-      content: Buffer.from("locations: label_name").toString("base64"),
-    })
+    .reply(200, "locations: label_name")
 
     // List commits on a pull request
     // https://docs.github.com/en/rest/reference/pulls#list-commits-on-a-pull-request
@@ -636,14 +611,9 @@ test("custom location: label_name", async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.status, "in_progress");
       t.match(
         createCheckParams.output.summary,
         /The label "WIP" contains "WIP"/
@@ -652,7 +622,7 @@ test("custom location: label_name", async function (t) {
         createCheckParams.output.summary,
         /You can override the status by adding "@wip ready for review"/
       );
-      t.is(createCheckParams.output.title, 'Label contains "WIP"');
+      t.equal(createCheckParams.output.title, 'Label contains "WIP"');
       t.match(createCheckParams.output.text, /<td>label_name<\/td>/);
 
       return true;
@@ -664,11 +634,11 @@ test("custom location: label_name", async function (t) {
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.location, "label_name");
-  t.is(logParams.match, "WIP");
+  const logParams = output[0];
+  t.equal(logParams.location, "label_name");
+  t.equal(logParams.match, "WIP");
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("custom location: commits", async function (t) {
@@ -685,9 +655,7 @@ test("custom location: commits", async function (t) {
 
     // has config
     .get("/repos/wip/app/contents/.github%2Fwip.yml")
-    .reply(200, {
-      content: Buffer.from("locations: commit_subject").toString("base64"),
-    })
+    .reply(200, "locations: commit_subject")
 
     // List commits on a pull request
     // https://docs.github.com/en/rest/reference/pulls#list-commits-on-a-pull-request
@@ -713,14 +681,9 @@ test("custom location: commits", async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.status, "in_progress");
       t.match(
         createCheckParams.output.summary,
         /The commit subject "WIP: test" contains "WIP"/
@@ -740,11 +703,11 @@ test("custom location: commits", async function (t) {
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.location, "commit_subject");
-  t.is(logParams.match, "WIP");
+  const logParams = output[0];
+  t.equal(logParams.location, "commit_subject");
+  t.equal(logParams.match, "WIP");
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("complex config", async function (t) {
@@ -761,9 +724,9 @@ test("complex config", async function (t) {
 
     // has config
     .get("/repos/wip/app/contents/.github%2Fwip.yml")
-    .reply(200, {
-      content: Buffer.from(
-        `
+    .reply(
+      200,
+      `
 - terms:
   - 🚧
   - WIP
@@ -774,8 +737,7 @@ test("complex config", async function (t) {
   - fixup!
   - squash!
   locations: commit_subject`
-      ).toString("base64"),
-    })
+    )
 
     // List commits on a pull request
     // https://docs.github.com/en/rest/reference/pulls#list-commits-on-a-pull-request
@@ -806,14 +768,9 @@ test("complex config", async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.status, "in_progress");
       t.match(
         createCheckParams.output.summary,
         /The commit subject "fixup! test" contains "fixup!"/
@@ -833,11 +790,11 @@ test("complex config", async function (t) {
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.location, "commit_subject");
-  t.is(logParams.match, "fixup!");
+  const logParams = output[0];
+  t.equal(logParams.location, "commit_subject");
+  t.equal(logParams.match, "fixup!");
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("loads config from .github repository", async function (t) {
@@ -856,9 +813,7 @@ test("loads config from .github repository", async function (t) {
     .get("/repos/wip/app/contents/.github%2Fwip.yml")
     .reply(404)
     .get("/repos/wip/.github/contents/.github%2Fwip.yml")
-    .reply(200, {
-      content: Buffer.from("terms: 🚧").toString("base64"),
-    })
+    .reply(200, "terms: 🚧")
 
     // List commits on a pull request
     // https://docs.github.com/en/rest/reference/pulls#list-commits-on-a-pull-request
@@ -874,11 +829,6 @@ test("loads config from .github repository", async function (t) {
       check_runs: [],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs")
     .reply(201, {});
@@ -887,7 +837,7 @@ test("loads config from .github repository", async function (t) {
     require("./events/new-pull-request-with-emoji-title.json")
   );
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("loads commits once only", async function (t) {
@@ -906,15 +856,14 @@ test("loads commits once only", async function (t) {
     .get("/repos/wip/app/contents/.github%2Fwip.yml")
     .reply(404)
     .get("/repos/wip/.github/contents/.github%2Fwip.yml")
-    .reply(200, {
-      content: Buffer.from(
-        `
+    .reply(
+      200,
+      `
 - terms: 'foo'
   locations: commit_subject
 - terms: 'bar'
   locations: commit_subject`
-      ).toString("base64"),
-    })
+    )
 
     // List commits on a pull request
     // https://docs.github.com/en/rest/reference/pulls#list-commits-on-a-pull-request
@@ -936,11 +885,6 @@ test("loads commits once only", async function (t) {
       check_runs: [],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs")
     .reply(201, {});
@@ -949,7 +893,7 @@ test("loads commits once only", async function (t) {
     require("./events/new-pull-request-with-test-title.json")
   );
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("override", async function (t) {
@@ -971,16 +915,11 @@ test("override", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "completed");
-      t.is(createCheckParams.conclusion, "success");
-      t.is(createCheckParams.output.title, "Ready for review (override)");
+      t.equal(createCheckParams.status, "completed");
+      t.equal(createCheckParams.conclusion, "success");
+      t.equal(createCheckParams.output.title, "Ready for review (override)");
       t.match(
         createCheckParams.output.summary,
         /The status has been set to success by adding `@wip ready for review` to the pull request comment/
@@ -995,13 +934,13 @@ test("override", async function (t) {
   );
 
   // check resulting logs
-  t.is(this.probot.logger.info.lastCall.args[1], "❗️ wip/app#1");
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.wip, false);
-  t.is(logParams.override, true);
-  t.is(logParams.change, true);
+  t.equal(output[0].msg, "❗️ wip/app#1");
+  const logParams = output[0];
+  t.equal(logParams.wip, false);
+  t.equal(logParams.override, true);
+  t.equal(logParams.change, true);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("pending pull request with override", async function (t) {
@@ -1043,16 +982,11 @@ test("pending pull request with override", async function (t) {
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "completed");
-      t.is(createCheckParams.conclusion, "success");
-      t.is(createCheckParams.output.title, "Ready for review");
+      t.equal(createCheckParams.status, "completed");
+      t.equal(createCheckParams.conclusion, "success");
+      t.equal(createCheckParams.output.title, "Ready for review");
       t.match(
         createCheckParams.output.summary,
         /No match found based on configuration/
@@ -1067,11 +1001,11 @@ test("pending pull request with override", async function (t) {
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
-  t.is(logParams.wip, false);
-  t.is(logParams.change, true);
+  const logParams = output[0];
+  t.equal(logParams.wip, false);
+  t.equal(logParams.change, true);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test('pending pull request with override and "[WIP] test" title', async function (t) {
@@ -1113,14 +1047,9 @@ test('pending pull request with override and "[WIP] test" title', async function
       ],
     })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.status, "in_progress");
+      t.equal(createCheckParams.status, "in_progress");
 
       return true;
     })
@@ -1131,16 +1060,16 @@ test('pending pull request with override and "[WIP] test" title', async function
   );
 
   // check resulting logs
-  const logParams = this.probot.logger.child.lastCall.arg;
+  const logParams = output[0];
 
-  t.is(logParams.wip, true);
-  t.is(logParams.change, true);
+  t.equal(logParams.wip, true);
+  t.equal(logParams.change, true);
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
 
 test("custom APP_NAME", async function (t) {
-  simple.mock(process.env, "APP_NAME", "WIP (local-dev)");
+  process.env.APP_NAME = "WIP (local-dev)";
 
   const mock = nock("https://api.github.com")
     // has pro plan
@@ -1171,14 +1100,9 @@ test("custom APP_NAME", async function (t) {
     })
     .reply(200, { check_runs: [] })
 
-    // get combined status
-    // https://docs.github.com/en/rest/reference/repos#get-the-combined-status-for-a-specific-reference
-    .get("/repos/wip/app/commits/sha123/status")
-    .reply(200, { statuses: [] })
-
     // create new check run
     .post("/repos/wip/app/check-runs", (createCheckParams) => {
-      t.is(createCheckParams.name, "WIP (local-dev)");
+      t.equal(createCheckParams.name, "WIP (local-dev)");
 
       return true;
     })
@@ -1187,9 +1111,8 @@ test("custom APP_NAME", async function (t) {
   await this.probot.receive(
     require("./events/new-pull-request-with-test-title.json")
   );
-  simple.restore();
 
-  // t.is(this.probot.logger.child.lastCall.arg.name, "WIP (local-dev)");
+  t.equal(output[0].name, "WIP (local-dev)");
 
-  t.deepEqual(mock.activeMocks(), []);
+  t.same(mock.activeMocks(), []);
 });
