@@ -1,97 +1,90 @@
+const Stream = require("stream");
+
 const FakeTimers = require("@sinonjs/fake-timers");
-const { beforeEach, test } = require("tap");
+const { before, beforeEach, test } = require("tap");
 const nock = require("nock");
-const simple = require("simple-mock");
+const pino = require("pino");
 
 nock.disableNetConnect();
 
-// disable Probot logs, bust be set before requiring probot
-process.env.LOG_LEVEL = "fatal";
 const { Probot, ProbotOctokit } = require("probot");
 
 const app = require("../../");
 
-beforeEach(function (done) {
-  delete process.env.APP_NAME;
-  process.env.DISABLE_STATS = "true";
-  process.env.DISABLE_WEBHOOK_EVENT_CHECK = "true";
-  process.env.WIP_DISABLE_MEMORY_USAGE = "true";
+let output;
+const streamLogsToOutput = new Stream.Writable({ objectMode: true });
+streamLogsToOutput._write = (object, encoding, done) => {
+  output.push(JSON.parse(object));
+  done();
+};
 
+before(function () {
   FakeTimers.install({ toFake: ["Date"] });
+});
 
-  this.probot = new Probot({
+let probot;
+beforeEach(function () {
+  output = [];
+  delete process.env.APP_NAME;
+
+  probot = new Probot({
     id: 1,
     githubToken: "test",
-    Octokit: ProbotOctokit.defaults({
-      throttle: { enabled: false },
-      retry: { enabled: false },
+    Octokit: ProbotOctokit.defaults((instanceOptions) => {
+      return {
+        ...instanceOptions,
+        throttle: { enabled: false },
+        retry: { enabled: false },
+        log: pino(streamLogsToOutput),
+      };
     }),
+    log: pino(streamLogsToOutput),
   });
 
-  this.probot.logger.info = simple.mock();
-  this.probot.logger.child = simple.mock().returnWith(this.probot.logger);
-
-  this.probot.load(app);
-
-  done();
+  probot.load(app);
 });
 
 test("purchase free", async function (t) {
-  await this.probot.receive(require("./events/purchase.json"));
+  await probot.receive(require("./events/purchase.json"));
 
-  t.is(
-    this.probot.logger.info.lastCall.arg,
-    "🆕🆓 Organization wip purchased Free"
-  );
+  t.equal(output[0].msg, "🆕🆓 Organization wip purchased Free");
 
   t.end();
 });
 
 test("purchase enterprise", async function (t) {
-  await this.probot.receive(require("./events/purchase-enterprise.json"));
+  await probot.receive(require("./events/purchase-enterprise.json"));
 
-  t.is(
-    this.probot.logger.info.lastCall.arg,
-    "🆕💰 Organization wip purchased Enterprise"
-  );
+  t.equal(output[0].msg, "🆕💰 Organization wip purchased Enterprise");
 
   t.end();
 });
 test("upgrade", async function (t) {
-  await this.probot.receive(require("./events/upgrade.json"));
+  await probot.receive(require("./events/upgrade.json"));
 
-  t.is(
-    this.probot.logger.info.lastCall.arg,
-    "⬆️💵 Organization wip changed to Pro"
-  );
+  t.equal(output[0].msg, "⬆️💵 Organization wip changed to Pro");
 
   t.end();
 });
 test("upgrade", async function (t) {
-  await this.probot.receive(require("./events/downgrade.json"));
+  await probot.receive(require("./events/downgrade.json"));
 
-  t.is(
-    this.probot.logger.info.lastCall.arg,
-    "⬇️💵 Organization wip changed to Pro"
-  );
+  t.equal(output[0].msg, "⬇️💵 Organization wip changed to Pro");
 
   t.end();
 });
 test("cancellation", async function (t) {
-  await this.probot.receive(require("./events/cancellation.json"));
+  await probot.receive(require("./events/cancellation.json"));
 
-  t.is(
-    this.probot.logger.info.lastCall.arg,
-    "🚫🆓 Organization wip cancelled Free"
-  );
+  t.equal(output[0].msg, "🚫🆓 Organization wip cancelled Free");
 
   t.end();
 });
 
 test("pending_change", async function (t) {
-  await this.probot.receive(require("./events/upgrade-pending.json"));
+  await probot.receive(require("./events/upgrade-pending.json"));
 
-  t.is(this.probot.logger.info.callCount, 0);
+  t.equal(output.length, 0);
 
   t.end();
 });
